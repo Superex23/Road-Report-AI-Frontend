@@ -67,6 +67,34 @@ export interface SubmitReportResponse {
   createdAt: string;
 }
 
+export interface UserRoadIssue {
+  id: number;
+  roadName: string;
+  issueType: 'pothole' | 'flooding' | 'debris' | 'construction' | 'signal_outage' | 'other';
+  description: string;
+  latitude?: number;
+  longitude?: number;
+  createdAt: string;
+}
+
+export interface ModelMetricsResponse {
+  status: 'ok' | 'degraded';
+  message: string;
+  model_path: string;
+  feature_columns_path?: string | null;
+  model_type?: string | null;
+  model_version?: string | null;
+  available?: boolean | null;
+  input_size?: number | null;
+  known_road_count?: number | null;
+  rows_used?: number | null;
+  threshold?: number | null;
+  accuracy?: number | null;
+  precision?: number | null;
+  recall?: number | null;
+  f1?: number | null;
+}
+
 export interface GeocodeResult {
   displayName: string;
   latitude: number;
@@ -213,4 +241,48 @@ export async function submitUserReport(payload: SubmitReportRequest): Promise<Su
   }
 
   return (await response.json()) as SubmitReportResponse;
+}
+
+export async function fetchUserReports(roadName?: string, limit = 8): Promise<UserRoadIssue[]> {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (roadName?.trim()) {
+    params.set('road_name', roadName.trim());
+  }
+
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/reports?${params.toString()}`);
+
+  if (!response.ok) {
+    let detail = `Request failed with status ${response.status}`;
+    try {
+      const data = await response.json();
+      if (typeof data?.detail === 'string' && data.detail.trim()) {
+        detail = data.detail;
+      }
+    } catch {
+      // no-op
+    }
+    throw new Error(detail);
+  }
+
+  return (await response.json()) as UserRoadIssue[];
+}
+
+export async function fetchModelMetrics(): Promise<ModelMetricsResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/risk/model-metrics`);
+
+  if (!response.ok) {
+    let detail = `Request failed with status ${response.status}`;
+    try {
+      const data = await response.json();
+      if (typeof data?.detail === 'string' && data.detail.trim()) {
+        detail = data.detail;
+      }
+    } catch {
+      // no-op
+    }
+    throw new Error(detail);
+  }
+
+  return (await response.json()) as ModelMetricsResponse;
 }
