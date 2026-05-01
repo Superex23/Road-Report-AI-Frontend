@@ -1048,7 +1048,7 @@ const SafetyReportPage = ({
                                 {issue.roadName}
                               </span>
                             </div>
-                            <div className="mt-2 text-sm leading-relaxed text-secondary/65">{issue.description}</div>
+                            <div className="mt-2 text-sm leading-relaxed text-secondary/60">{issue.description}</div>
                             <div className="mt-3 text-[10px] font-medium uppercase tracking-widest text-secondary/35">
                               {new Date(issue.createdAt).toLocaleString()}
                             </div>
@@ -1588,7 +1588,7 @@ const DocumentationPage = () => {
         <div>
           <div className="mb-3 text-[10px] font-bold uppercase tracking-widest text-primary">Workflow</div>
           <h2 className="mb-5 font-display text-3xl font-bold text-secondary">How a report is generated</h2>
-          <div className="space-y-4 text-sm leading-relaxed text-secondary/65">
+          <div className="space-y-4 text-sm leading-relaxed text-secondary/60">
             <p>The frontend first geocodes a road or location query, then sends coordinates to the prediction API.</p>
             <p>The backend combines historical crash patterns, weather context, and road pressure signals to return a normalized risk score.</p>
             <p>The UI translates that score into a tier, a summary, and map/report surfaces that can be reviewed by users in seconds.</p>
