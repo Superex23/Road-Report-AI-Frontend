@@ -6,13 +6,14 @@ export interface Stat {
   description: string;
 }
 
-export interface Incident {
-  id: string;
-  type: string;
-  date: string;
-  time: string;
-  severity: 'Low' | 'Moderate' | 'High' | 'Critical';
-  location: string;
+export interface RoadIssue {
+  id: number;
+  roadName: string;
+  issueType: 'pothole' | 'flooding' | 'debris' | 'construction' | 'signal_outage' | 'other';
+  description: string;
+  latitude?: number;
+  longitude?: number;
+  createdAt: string;
 }
 
 export type RiskTier = 'Low' | 'Moderate' | 'High' | 'Critical';

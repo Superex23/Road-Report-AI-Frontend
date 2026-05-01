@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   ArrowRight,
   CloudSun,
+  Cpu,
   Database,
   ExternalLink,
   FileText,
@@ -22,8 +23,15 @@ import {
 import { ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
 import { cn } from './lib/utils';
 import { LANDING_STATS, NAV_ITEMS, TEAM_MEMBERS } from './constants';
-import { fetchRoadSuggestions, geocodeLocation, predictRisk, submitUserReport } from './lib/risk';
-import type { Incident, LiveReport, Page, ReportComponent, RiskTier } from './types';
+import {
+  fetchModelMetrics,
+  fetchRoadSuggestions,
+  fetchUserReports,
+  geocodeLocation,
+  predictRisk,
+  submitUserReport,
+} from './lib/risk';
+import type { LiveReport, Page, ReportComponent, RiskTier, RoadIssue } from './types';
 import { RiskMap } from './RiskMap';
 
 /* ------------------------------------------------------------------ */
@@ -98,6 +106,9 @@ function sanitizeWarnings(warnings: string[] | undefined): string[] {
   const hasConservativeWeatherEstimate = warnings.some((warning) =>
     warning.includes('Weather data unavailable; environmental component estimated conservatively.'),
   );
+  const hasModelFallback = warnings.some((warning) =>
+    warning.includes('Model normalization bounds were too narrow'),
+  );
 
   const friendlyWarnings: string[] = [];
 
@@ -105,6 +116,11 @@ function sanitizeWarnings(warnings: string[] | undefined): string[] {
     friendlyWarnings.push(
       'Live weather conditions could not be confirmed for this lookup, so the environmental impact was estimated conservatively.',
     );
+  }
+
+  // Keep model-fallback behavior internal for now. It is useful for debugging but too noisy for report readers.
+  if (hasModelFallback) {
+    // no-op
   }
 
   return friendlyWarnings;
@@ -117,6 +133,61 @@ function flattenComponents(components: NonNullable<Awaited<ReturnType<typeof pre
     components.environmental,
     components.traffic,
   ];
+}
+
+function getReportQuality(report: LiveReport | null): {
+  label: string;
+  detail: string;
+} {
+  if (!report) {
+    return {
+      label: 'Waiting',
+      detail: 'Quality indicators appear after a route is analyzed.',
+    };
+  }
+
+  if (report.warnings.length > 0) {
+    return {
+      label: 'Estimated',
+      detail: 'The report is still usable, but one or more context sources required fallback behavior.',
+    };
+  }
+
+  if (report.weather?.source === 'weather.gov' || report.weather?.source === 'open-meteo') {
+    return {
+      label: 'Strong',
+      detail: 'Live context sources were available and the report includes full scoring breakdowns.',
+    };
+  }
+
+  return {
+    label: 'Moderate',
+    detail: 'The score is available, but some context data may have been inferred rather than observed live.',
+  };
+}
+
+function formatIssueType(issueType: RoadIssue['issueType']): string {
+  switch (issueType) {
+    case 'signal_outage':
+      return 'Signal outage';
+    default:
+      return issueType.charAt(0).toUpperCase() + issueType.slice(1);
+  }
+}
+
+function getIssueSeverity(issueType: RoadIssue['issueType']): RiskTier {
+  switch (issueType) {
+    case 'flooding':
+    case 'signal_outage':
+      return 'Critical';
+    case 'construction':
+    case 'debris':
+      return 'High';
+    case 'pothole':
+      return 'Moderate';
+    default:
+      return 'Low';
+  }
 }
 
 const DEFAULT_PAGE: Page = 'landing';
@@ -285,6 +356,7 @@ const LandingPage = ({
   error: string | null;
 }) => (
   <div className="mx-auto max-w-7xl px-6 pb-20 pt-24">
+    {/* Hero */}
     <div className="mb-24 grid items-center gap-12 lg:grid-cols-2">
       <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.6 }}>
         <div className="mb-6 flex items-center gap-2">
@@ -360,6 +432,7 @@ const LandingPage = ({
       </div>
     </div>
 
+    {/* Stats */}
     <div className="mb-20 grid gap-12 md:grid-cols-3">
       {LANDING_STATS.map((stat) => (
         <div key={stat.label}>
@@ -370,6 +443,7 @@ const LandingPage = ({
       ))}
     </div>
 
+    {/* Feature cards */}
     <div className="mb-20 grid gap-8 md:grid-cols-3">
       {[
         {
@@ -398,6 +472,7 @@ const LandingPage = ({
       ))}
     </div>
 
+    {/* CTA */}
     <div className="rounded-3xl bg-secondary p-12 text-center shadow-2xl lg:p-16">
       <h2 className="mb-4 font-display text-3xl font-bold text-white lg:text-4xl">Ready for a safer journey?</h2>
       <p className="mb-8 text-sm text-white/60">
@@ -518,12 +593,11 @@ const SafetyReportPage = ({
   const [roadName, setRoadName] = useState('');
   const [issueType, setIssueType] = useState('other');
   const [description, setDescription] = useState('');
-  const incidents: Incident[] = [
-    { id: '1', type: 'Multi-Vehicle Collision', date: 'MAY 14, 2024', time: '08:42 AM', severity: 'Critical', location: 'I-35 Northbound' },
-    { id: '2', type: 'Secondary Surface Hazard', date: 'MAY 12, 2024', time: '11:15 PM', severity: 'Low', location: 'Segment TX-32' },
-    { id: '3', type: 'Single Lane Obstruction', date: 'MAY 11, 2024', time: '04:08 PM', severity: 'Moderate', location: 'Austin Central' },
-  ];
+  const [recentIssues, setRecentIssues] = useState<RoadIssue[]>([]);
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issuesError, setIssuesError] = useState<string | null>(null);
   const ringOffset = report ? 364.4 - (364.4 * report.score) / 100 : 364.4;
+  const reportQuality = getReportQuality(report);
 
   useEffect(() => {
     if (report?.query) {
@@ -531,9 +605,52 @@ const SafetyReportPage = ({
     }
   }, [report?.query]);
 
+  useEffect(() => {
+    if (!report?.road) {
+      setRecentIssues([]);
+      setIssuesError(null);
+      setIssuesLoading(false);
+      return;
+    }
+
+    let isActive = true;
+
+    const loadIssues = async () => {
+      setIssuesLoading(true);
+      setIssuesError(null);
+
+      try {
+        const issues = await fetchUserReports(report.road, 6);
+        if (isActive) {
+          setRecentIssues(issues);
+        }
+      } catch (loadError) {
+        if (isActive) {
+          setRecentIssues([]);
+          setIssuesError(
+            loadError instanceof Error
+              ? loadError.message
+              : 'Unable to load recent roadway reports right now.',
+          );
+        }
+      } finally {
+        if (isActive) {
+          setIssuesLoading(false);
+        }
+      }
+    };
+
+    void loadIssues();
+
+    return () => {
+      isActive = false;
+    };
+  }, [report?.road, issueFeedback]);
+
   return (
     <div className="min-h-screen pt-16">
       <main className="mx-auto max-w-5xl px-6 py-8">
+        {/* Header */}
         <div className="mb-2 flex items-center gap-2">
           <div className="h-1.5 w-1.5 rounded-full bg-primary" />
           <span className="text-[10px] font-bold uppercase tracking-widest text-primary">
@@ -555,7 +672,45 @@ const SafetyReportPage = ({
         ) : null}
         {error ? <div className="mb-8 rounded-xl bg-white p-5 text-sm text-red-500 shadow-sm">{error}</div> : null}
 
+        {report ? (
+          <div className="mb-10 grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+            <div className="glass-card p-8">
+              <div className="mb-3 text-[10px] font-bold uppercase tracking-widest text-primary">Report quality</div>
+              <h4 className="mb-4 text-lg font-bold text-secondary">{reportQuality.label}</h4>
+              <p className="text-sm leading-relaxed text-secondary/60">{reportQuality.detail}</p>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-tertiary bg-white/70 p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-secondary/40">Source road</div>
+                  <div className="mt-2 text-sm font-medium text-secondary">{report.road}</div>
+                </div>
+                <div className="rounded-2xl border border-tertiary bg-white/70 p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-secondary/40">Segment label</div>
+                  <div className="mt-2 text-sm font-medium text-secondary">{report.segment}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="glass-card p-8">
+              <div className="mb-3 text-[10px] font-bold uppercase tracking-widest text-primary">Reading the result</div>
+              <h4 className="mb-4 text-lg font-bold text-secondary">Interpretation notes</h4>
+              <div className="space-y-3">
+                {[
+                  'Scores represent relative crash-risk intensity for the selected corridor at the time of the request.',
+                  'Component cards explain what pushed the score upward rather than serving as independent predictions.',
+                  'Warnings indicate context quality or fallback behavior, not a failed report.',
+                ].map((note) => (
+                  <div key={note} className="rounded-xl border border-tertiary bg-white/70 px-4 py-3 text-sm text-secondary/60">
+                    {note}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Score + Analysis */}
         <div className="mb-10 grid gap-6 md:grid-cols-2">
+          {/* Risk Score */}
           <div className="glass-card p-8">
             <div className="mb-8 flex items-center justify-between">
               <h4 className="text-lg font-bold">Risk Score</h4>
@@ -610,6 +765,7 @@ const SafetyReportPage = ({
             </div>
           </div>
 
+          {/* Analysis Summary */}
           <div className="glass-card p-8">
             <div className="mb-6 flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
@@ -770,45 +926,90 @@ const SafetyReportPage = ({
 
         {report ? (
           <div>
-            <h3 className="mb-6 text-xl font-bold">Historical Incident Logs</h3>
-            <div className="space-y-4">
-              {incidents.map((incident) => (
-                <div key={incident.id} className="glass-card flex items-center justify-between p-4">
-                  <div className="flex items-center gap-4">
-                    <div
-                      className={cn(
-                        'flex h-10 w-10 items-center justify-center rounded-lg',
-                        incident.severity === 'Critical'
-                          ? 'bg-red-100 text-red-500'
-                          : incident.severity === 'Moderate'
-                            ? 'bg-orange-100 text-orange-500'
-                            : 'bg-primary/10 text-primary',
-                      )}
-                    >
-                      <AlertTriangle className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-bold text-secondary">{incident.type}</div>
-                      <div className="text-[10px] font-medium text-secondary/40">
-                        {incident.date} · {incident.time}
+            <div className="mb-6 flex items-end justify-between gap-4">
+              <div>
+                <h3 className="text-xl font-bold">Recent Roadway Reports</h3>
+                <p className="mt-1 text-sm text-secondary/50">
+                  Live submissions saved by the backend for this corridor or road name.
+                </p>
+              </div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-secondary/35">
+                Community signal
+              </div>
+            </div>
+            {issuesLoading ? (
+              <div className="glass-card flex items-center gap-3 p-5 text-sm text-secondary/60">
+                <div className="h-2 w-2 animate-pulse rounded-full bg-primary" />
+                Loading recent roadway reports...
+              </div>
+            ) : issuesError ? (
+              <div className="glass-card rounded-xl border border-orange-200 bg-orange-50 p-5 text-sm text-orange-700">
+                {issuesError}
+              </div>
+            ) : recentIssues.length > 0 ? (
+              <div className="space-y-4">
+                {recentIssues.map((issue) => {
+                  const severity = getIssueSeverity(issue.issueType);
+
+                  return (
+                    <div key={issue.id} className="glass-card p-5">
+                      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                        <div className="flex items-start gap-4">
+                          <div
+                            className={cn(
+                              'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+                              severity === 'Critical'
+                                ? 'bg-red-100 text-red-500'
+                                : severity === 'High'
+                                  ? 'bg-orange-100 text-orange-500'
+                                  : severity === 'Moderate'
+                                    ? 'bg-primary/10 text-primary'
+                                    : 'bg-emerald-100 text-emerald-500',
+                            )}
+                          >
+                            <AlertTriangle className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-3">
+                              <div className="text-sm font-bold text-secondary">{formatIssueType(issue.issueType)}</div>
+                              <span className="rounded-full border border-tertiary px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-secondary/45">
+                                {issue.roadName}
+                              </span>
+                            </div>
+                            <div className="mt-2 text-sm leading-relaxed text-secondary/65">{issue.description}</div>
+                            <div className="mt-3 text-[10px] font-medium uppercase tracking-widest text-secondary/35">
+                              {new Date(issue.createdAt).toLocaleString()}
+                            </div>
+                          </div>
+                        </div>
+                        <div
+                          className={cn(
+                            'inline-flex rounded px-2 py-1 text-[10px] font-bold uppercase text-white',
+                            severity === 'Critical'
+                              ? 'bg-red-500'
+                              : severity === 'High'
+                                ? 'bg-orange-500'
+                                : severity === 'Moderate'
+                                  ? 'bg-primary'
+                                  : 'bg-emerald-500',
+                          )}
+                        >
+                          {severity}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div
-                    className={cn(
-                      'rounded px-2 py-0.5 text-[10px] font-bold uppercase text-white',
-                      incident.severity === 'Critical'
-                        ? 'bg-red-500'
-                        : incident.severity === 'Moderate'
-                          ? 'bg-orange-500'
-                          : 'bg-primary',
-                    )}
-                  >
-                    {incident.severity}
-                  </div>
-                </div>
-              ))}
-            </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="glass-card p-6">
+                <div className="mb-2 text-sm font-bold text-secondary">No recent roadway reports yet</div>
+                <p className="text-sm leading-relaxed text-secondary/60">
+                  This route has not received any saved user issue reports yet. Submitting one above will make this
+                  section immediately more useful for the next viewer.
+                </p>
+              </div>
+            )}
           </div>
         ) : null}
       </main>
@@ -832,6 +1033,7 @@ const AboutPage = () => {
 
   return (
     <div className="mx-auto max-w-5xl px-6 pb-20 pt-24">
+      {/* Intro */}
       <div className="mb-16">
         <h1 className="mb-6 font-display text-5xl font-bold text-secondary">
           About Road Report <span className="text-primary">AI</span>
@@ -843,6 +1045,7 @@ const AboutPage = () => {
         </p>
       </div>
 
+      {/* Data Sources */}
       <div className="mb-16">
         <h2 className="mb-8 font-display text-2xl font-bold text-secondary">Data Sources</h2>
         <div className="grid gap-6 md:grid-cols-2">
@@ -881,6 +1084,7 @@ const AboutPage = () => {
         </div>
       </div>
 
+      {/* RRS Formula */}
       <div className="mb-16">
         <h2 className="mb-8 font-display text-2xl font-bold text-secondary">Road Risk Score Formula</h2>
         <div className="mb-8 rounded-2xl border border-tertiary bg-white p-8 text-center shadow-sm">
@@ -905,6 +1109,7 @@ const AboutPage = () => {
         </div>
       </div>
 
+      {/* Tech Stack */}
       <div className="mb-16">
         <h2 className="mb-8 font-display text-2xl font-bold text-secondary">Tech Stack</h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -929,6 +1134,7 @@ const AboutPage = () => {
         </div>
       </div>
 
+      {/* Model Stats */}
       <div className="mb-16 grid gap-4 sm:grid-cols-3 lg:grid-cols-5">
         {[
           { val: '99.4%', label: 'Training accuracy' },
@@ -944,6 +1150,7 @@ const AboutPage = () => {
         ))}
       </div>
 
+      {/* Team */}
       <div>
         <h2 className="mb-8 font-display text-2xl font-bold text-secondary">The Team</h2>
         <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-5">
@@ -962,6 +1169,28 @@ const AboutPage = () => {
 };
 
 const MethodologyPage = () => {
+  const [metrics, setMetrics] = useState<Awaited<ReturnType<typeof fetchModelMetrics>> | null>(null);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    fetchModelMetrics()
+      .then((data) => {
+        if (!mounted) return;
+        setMetrics(data);
+        setMetricsError(null);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setMetricsError(error instanceof Error ? error.message : 'Unable to load model runtime metadata.');
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const componentWeights = [
     { key: 'C', label: 'Road Condition', weight: 30, detail: 'Road class, surface condition estimate, corridor pressure.' },
     { key: 'A', label: 'Historical Pattern', weight: 30, detail: 'Time-window risk profile and historical crash context.' },
@@ -1029,8 +1258,8 @@ const MethodologyPage = () => {
 
           <div className="grid gap-3 sm:grid-cols-2">
             {[
-              { label: 'Model family', value: 'Logistic regression runtime' },
-              { label: 'Output package', value: 'Score, tier, advice, weather, components' },
+              { label: 'Model family', value: metrics?.model_type || 'Logistic regression runtime' },
+              { label: 'Model version', value: metrics?.model_version || 'Current runtime build' },
               { label: 'Primary weather source', value: 'Weather.gov with Open-Meteo fallback' },
               { label: 'Display philosophy', value: 'Calibrated score with explainable breakdowns' },
             ].map((item) => (
@@ -1125,6 +1354,45 @@ const MethodologyPage = () => {
       </section>
 
       <section className="mb-16 grid gap-8 lg:grid-cols-[1fr_1fr]">
+        <div className="glass-card p-8">
+          <div className="mb-3 text-[10px] font-bold uppercase tracking-widest text-primary">Runtime</div>
+          <h2 className="mb-6 font-display text-3xl font-bold text-secondary">Live model metadata</h2>
+          {metrics ? (
+            <div className="space-y-3 text-sm text-secondary/70">
+              <div className="flex items-start justify-between gap-4 border-b border-tertiary pb-3">
+                <span>Status</span>
+                <span className="font-bold text-secondary">{metrics.status}</span>
+              </div>
+              <div className="flex items-start justify-between gap-4 border-b border-tertiary pb-3">
+                <span>Available</span>
+                <span className="font-bold text-secondary">{metrics.available ? 'Yes' : 'No'}</span>
+              </div>
+              <div className="flex items-start justify-between gap-4 border-b border-tertiary pb-3">
+                <span>Known roads</span>
+                <span className="font-bold text-secondary">{metrics.known_road_count ?? '--'}</span>
+              </div>
+              <div className="flex items-start justify-between gap-4 border-b border-tertiary pb-3">
+                <span>Input size</span>
+                <span className="font-bold text-secondary">{metrics.input_size ?? '--'}</span>
+              </div>
+              <div className="flex items-start justify-between gap-4 border-b border-tertiary pb-3">
+                <span>Threshold</span>
+                <span className="font-bold text-secondary">
+                  {metrics.threshold != null ? metrics.threshold.toFixed(3) : '--'}
+                </span>
+              </div>
+              <div className="flex items-start justify-between gap-4">
+                <span>Message</span>
+                <span className="max-w-[260px] text-right font-medium text-secondary">{metrics.message}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-tertiary bg-white/70 px-4 py-3 text-sm text-secondary/60">
+              {metricsError || 'Loading live model metadata...'}
+            </div>
+          )}
+        </div>
+
         <div className="glass-card p-8">
           <div className="mb-3 text-[10px] font-bold uppercase tracking-widest text-primary">Interpretation</div>
           <h2 className="mb-5 font-display text-3xl font-bold text-secondary">How to read the score</h2>
@@ -1470,6 +1738,7 @@ export default function App() {
     setError(null);
 
     try {
+      setRoadSuggestions([]);
       const geocode = await geocodeLocation(trimmed);
       const geocodedRoadName = geocode.displayName.split(',')[0]?.trim();
       const normalizedRoadName = geocodedRoadName || trimmed.split(',')[0]?.trim() || trimmed;
