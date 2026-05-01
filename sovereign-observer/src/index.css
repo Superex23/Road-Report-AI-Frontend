@@ -59,7 +59,9 @@
 .theme-dark .glass-card,
 .theme-dark .btn-secondary,
 .theme-dark .bg-white,
+.theme-dark .bg-white\/70,
 .theme-dark .bg-white\/80,
+.theme-dark .bg-white\/85,
 .theme-dark .bg-white\/90,
 .theme-dark .bg-\[\#F8FAF9\],
 .theme-dark .bg-\[\#F8FAF9\]\/80,
@@ -79,8 +81,16 @@
   color: #ecf0ed !important;
 }
 
+.theme-dark .text-secondary\/70 {
+  color: rgba(236, 240, 237, 0.8) !important;
+}
+
 .theme-dark .text-secondary\/60 {
   color: rgba(236, 240, 237, 0.66) !important;
+}
+
+.theme-dark .text-secondary\/50 {
+  color: rgba(236, 240, 237, 0.5) !important;
 }
 
 .theme-dark .text-secondary\/40 {
