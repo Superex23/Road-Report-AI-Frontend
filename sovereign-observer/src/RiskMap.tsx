@@ -139,7 +139,7 @@ export const RiskMap: React.FC<RiskMapProps> = ({ bounds, className, report }) =
           way["highway"="secondary"](${s},${w},${n},${e});
           way["highway"="tertiary"](${s},${w},${n},${e});
         );
-        out geom tags;
+        out tags geom;
       `;
 
       try {
